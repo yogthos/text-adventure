@@ -53,6 +53,9 @@ const STATE_PREDS: PredSpec[] = [
   { name: "npc_state", arity: 2 },
   { name: "flag", arity: 1 },
   { name: "condition", arity: 2 },
+  { name: "told", arity: 2 },
+  { name: "item_state", arity: 2 },
+  { name: "holds", arity: 2 },
   { name: "turn_count", arity: 1 },
   { name: "event_log", arity: 2 },
   { name: "player_stat", arity: 2 },
@@ -149,6 +152,3 @@ export async function newGame(session: PrologSession, seedPath: string): Promise
   await loadSchema(session);
   await consultFile(session, seedPath);
 }
-
-// Re-exported only so callers can resolve the saves dir consistently.
-export { SAVES_ROOT };

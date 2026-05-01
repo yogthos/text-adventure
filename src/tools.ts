@@ -40,6 +40,9 @@ export const STATE_PREDS = new Set([
   "npc_state",
   "flag",
   "condition",
+  "told",
+  "item_state",
+  "holds",
   "turn_count",
   "event_log",
   // Roguelike state.
@@ -98,7 +101,7 @@ export const TOOL_SCHEMAS: ChatToolDef[] = [
     function: {
       name: "state_set",
       description:
-        "Mutate world state via Prolog directives. Each statement MUST be a directive (:- ...) using assertz/1, retract/1, or retractall/1 on one of the dynamic state predicates: player_at, player_has, at, visited, npc_state, flag, condition, turn_count, event_log. Use this to move the player, take/drop items, set flags, layer location conditions, advance npc_state, increment turn_count, and append event_log entries. Never use this to touch lore predicates.",
+        "Mutate world state via Prolog directives. Each statement MUST be a directive (:- ...) using assertz/1, retract/1, or retractall/1 on one of the dynamic state predicates: player_at, player_has, at, visited, npc_state, flag, condition, told, item_state, holds, turn_count, event_log. Use this to move the player, take/drop items, set flags, layer location conditions, track NPC conversations via told/2, update item properties via item_state/2, manage container contents via holds/2, advance npc_state, increment turn_count, and append event_log entries. Never use this to touch lore predicates.",
       parameters: {
         type: "object",
         properties: {

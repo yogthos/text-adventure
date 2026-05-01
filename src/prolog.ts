@@ -69,6 +69,15 @@ function bindingsToFormatted(bindings: Record<string, string>): string {
   return entries.map(([k, v]) => `${k} = ${v}`).join(", ");
 }
 
+/** Strip surrounding single quotes and unescape Prolog atom/string escapes. */
+export function unq(s: string | undefined): string {
+  if (!s) return "";
+  if (s.startsWith("'") && s.endsWith("'")) {
+    return s.slice(1, -1).replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+  }
+  return s;
+}
+
 let plPromise: Promise<PrologFull> | null = null;
 let pathCounter = 0;
 
@@ -94,6 +103,14 @@ function normalizeQuery(q: string): string {
   let s = q.trim();
   if (s.startsWith("?-")) s = s.slice(2).trim();
   if (s.endsWith(".")) s = s.slice(0, -1).trim();
+  // Block Prolog metacharacters that the LLM should never emit in a
+  // read-only query: disjunction, cut, line/block comments.
+  if (/[;!]/.test(s)) {
+    throw new Error(`query contains disallowed metacharacters: "${s.slice(0, 80)}"`);
+  }
+  if (s.includes("%") || s.includes("/*")) {
+    throw new Error(`query contains comments: "${s.slice(0, 80)}"`);
+  }
   return s;
 }
 
@@ -104,7 +121,12 @@ async function executeQuery(
   pl: PrologFull,
   goal: string,
 ): Promise<PrologResult> {
-  const normalized = normalizeQuery(goal);
+  let normalized: string;
+  try {
+    normalized = normalizeQuery(goal);
+  } catch (e) {
+    return { status: "error", error: e instanceof Error ? e.message : String(e) };
+  }
   if (!normalized) return { status: "error", error: "empty query" };
 
   // catch existence_error so queries against undefined-but-declared-dynamic

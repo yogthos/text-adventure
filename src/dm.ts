@@ -21,6 +21,7 @@
 import { chat, type ChatMessage } from "./llm.js";
 import { executeTool, TOOL_SCHEMAS, type ToolContext } from "./tools.js";
 import type { PrologSession } from "./prolog.js";
+import { unq } from "./prolog.js";
 
 const MAX_TOOL_TURNS_PLAY = 16;
 const MAX_TOOL_TURNS_WORLDGEN = 32;
@@ -78,6 +79,9 @@ Mutable state (mutate ONLY via state_set directives):
   visited(Loc).
   npc_state(CharId, [k=v, ...]).
   flag(Atom).
+  told(CharId, Topic).                              % conversation topics discussed with an NPC; append each time you narrate dialogue
+  item_state(ItemId, [k=v, ...]).                   % mutable item properties: lit, open, locked, broken, etc. Retractall + re-assert to update.
+  holds(ContainerId, ItemId).                       % items inside containers; assert when placed, retract when removed
   condition(Loc, DescAtomOrString).               % layered changes since first visit; KEY for revisits
   turn_count(N).
   event_log(N, Text).
@@ -97,7 +101,7 @@ ${SCHEMA_BLOCK}
 
 # Tools
 
-- world_query(goal): run a Prolog query — read-only. USE THIS FIRST whenever you're unsure (e.g. "do I have an item that could open this?").
+- world_query(goal): run a Prolog query — read-only. USE THIS FIRST whenever you're unsure (e.g. "do I have an item that could open this?"). Results are capped at 50 answers — if the cap is hit, refine your query to be more specific.
 - world_assert(code): append lore. Bare clauses only; only the lore predicates listed above. Use when player enters uncharted territory or you introduce new items / NPCs / lore facts.
 - state_set(code): mutate state. Each statement must be a directive whose body is ONLY assertz/retract/retractall calls, joined by commas. No arithmetic, no \`is/2\`, no \`write\`, no other goals. To compute a new value (e.g. turn_count + 1), FIRST world_query the current value, THEN state_set with the literal new value:
     world_query("turn_count(N)")          # returns e.g. N = 3
@@ -110,7 +114,7 @@ ${SCHEMA_BLOCK}
 1. Read the context bundle. Notice the scenario premise/goal — every turn should be moving toward (or away from) victory.
 2. ALWAYS increment turn_count by exactly 1 every turn (query its current value, then state_set with N+1). The turn_limit will run out — that's the roguelike clock.
 3. If the player wants to enter UNCHARTED territory (the destination has no location/3), use world_assert FIRST: location/3 + outgoing exit/3 + any item_def/4 / character_def/4 you place there. Pick stable snake_case ids that fit the scenario's setting.
-4. Use state_set to apply consequences: move the player, take/drop items, layer condition/2 changes, update npc_state/2, update player_stat/2 if relevant, append event_log/2 (turn_count, brief sentence).
+4. Use state_set to apply consequences: move the player, take/drop items, layer condition/2 changes, update npc_state/2 (including disposition changes), assert told/2 for conversations, update item_state/2 for object changes, manage holds/2 when containers are opened/closed, update player_stat/2 if relevant, append event_log/2 (turn_count, brief sentence).
 5. narrate(text) — describe what the player sees / what happened. Don't recite the location's canonical description verbatim; weave it together with active conditions and the present items / NPCs.
 6. end_turn().
 
@@ -122,7 +126,55 @@ When the player re-enters a location they've been before:
   - Your narration MUST be consistent with: original description + accumulated conditions.
   - To represent change, ADD a new condition/2 (e.g. condition(cottage, 'burned to a charred shell')) — never rewrite the original description.
 
-# Roguelike consistency
+# NPC conversation memory (very important)
+
+NPCs must remember prior conversations. The KB tracks what's been discussed with each NPC via told(CharId, Topic). Follow these rules EVERY time the player interacts with an NPC:
+
+1. BEFORE narrating NPC dialogue, ALWAYS world_query(\"told('<char_id>', T)\") to see what topics have already been discussed.
+2. If NO told/2 facts exist for this NPC → it's a FIRST meeting. The NPC introduces themselves naturally (but briefly — no repeating full backstory). After narrating, state_set this:
+     :- assertz(told('<char_id>', greeted)).
+3. If told/2 facts DO exist → the NPC REMEMBERS previous conversations. Greet the player as someone they've spoken to before. Reference prior topics by name. Do NOT re-introduce themselves or repeat the same information they already shared.
+4. After EVERY significant piece of dialogue (giving directions, revealing lore, answering a question, reacting to player actions), APPEND a told/2 fact summarizing the topic discussed:
+     :- assertz(told('<char_id>', <topic_atom>)).
+   Use snake_case topic atoms: manor_entrance, lord_blackwood, treasury_location, etc.
+5. NEVER retract told/2 facts — they are append-only, building the conversation history over time.
+
+Example flow:
+  Player: "ask the reeve about the manor"
+  DM queries: told(reeve, T) → no answers (first meeting)
+  DM narrates intro dialogue, then state_set:
+    :- assertz(told(reeve, greeted)).
+    :- assertz(told(reeve, manor_entrance)).
+
+  Later, player: "ask the reeve about the lord"
+  DM queries: told(reeve, T) → [greeted, manor_entrance]
+  DM narrates: "The reeve looks up, recognizing you. 'You again. About the lord, then...'"
+  After narrating: :- assertz(told(reeve, lord_blackwood)).
+
+# Item & object state (very important)
+
+Objects in the world change. Track every meaningful mutation so the world stays consistent:
+
+- item_state(ItemId, [k=v, ...]) — mutable key-value list. Use it for states like: [lit=true], [open=true], [locked=false], [broken=true], [wet=true]. When the player interacts with an object and changes its state, retractall + re-assert the whole list:
+    state_set(":- retractall(item_state(lamp, _)), assertz(item_state(lamp, [lit=false])).")
+
+- holds(ContainerId, ItemId) — items inside containers (chests, barrels, drawers). ALWAYS check holds/2 before narrating container contents:
+    world_query("holds(chest, I), item_def(I, N, _, _)")
+  When the player opens a container, narrate what's inside based on holds/2. When they take an item from a container, retract the holds fact AND assert player_has:
+    state_set(":- retract(holds(chest, coin)), assertz(player_has(coin)).")
+  NEVER place a container's contents in the room via at/2 — always use holds/2.
+
+- When an item is DESTROYED or BROKEN, retract player_has/at AND assert item_state(id, [broken=true]). Don't silently remove it — the player should still notice the remains in the room description.
+
+- When an NPC's DISPOSITION changes (friendly → hostile after a betrayal, etc.), update npc_state with the new disposition:
+    state_set(":- retractall(npc_state(guard, _)), assertz(npc_state(guard, [disposition=hostile, reason=player_stole_key])).")
+  The DM should check npc_state for disposition before deciding how an NPC reacts to the player.
+
+# flag/1 vs condition/2: when to use each
+
+- flag(Atom): boolean world-level toggles. Use for global events that affect many things: flag(ship_is_sinking), flag(alarm_sounded), flag(reactor_meltdown). Flags are perfect for defeat/1 rule bodies.
+- condition(Loc, Desc): location-level changes. Use for room-specific mutations: condition(kitchen, 'bloody handprints smear the wall').
+  Rule of thumb: if the change is tied to ONE location, use condition/2. If it affects the whole world or multiple locations, use flag/1.
 
 - The scenario's victory/defeat conditions are already in the KB. After your end_turn the harness queries them automatically — DO NOT call state_set on game_status yourself; the harness owns that.
 - You MAY adjust player_stat/2 (e.g. take damage in combat, gain stamina from rest). Be consistent with prior turns.
@@ -218,14 +270,6 @@ async function findAll(session: PrologSession, goal: string) {
   return r.answers.map((a) => a.bindings);
 }
 
-function unq(s: string | undefined): string {
-  if (!s) return "";
-  if (s.startsWith("'") && s.endsWith("'")) {
-    return s.slice(1, -1).replace(/\\'/g, "'").replace(/\\\\/g, "\\");
-  }
-  return s;
-}
-
 async function buildScenarioBlock(session: PrologSession): Promise<string[]> {
   const lines: string[] = [];
   const sc = await findOne(session, "scenario(S, P, G)");
@@ -307,7 +351,15 @@ async function buildPlayContext(
     if (items.length) {
       lines.push(`items here:`);
       for (const it of items) {
-        lines.push(`  - ${unq(it.I)} ("${unq(it.N)}") tags=${unq(it.T)}`);
+        const iid = unq(it.I);
+        lines.push(`  - ${iid} ("${unq(it.N)}") tags=${unq(it.T)}`);
+        const isRow = await findOne(session, `item_state('${iid}', S)`);
+        if (isRow) lines.push(`    item_state: ${unq(isRow.S)}`);
+        const holdsRows = await findAll(session, `holds('${iid}', HI), item_def(HI, HN, _, _)`);
+        if (holdsRows.length) {
+          const contents = holdsRows.map((h) => unq(h.HN)).join(", ");
+          lines.push(`    contains: [${contents}]`);
+        }
       }
     }
 
@@ -317,10 +369,26 @@ async function buildPlayContext(
     );
     if (npcs.length) {
       lines.push(`NPCs here:`);
-      for (const n of npcs) {
-        const stateRow = await findOne(session, `npc_state('${unq(n.C)}', S)`);
-        const st = stateRow ? unq(stateRow.S) : "[]";
-        lines.push(`  - ${unq(n.C)} ("${unq(n.N)}") disposition=${unq(n.Disp)} state=${st}`);
+      // Batch NPC state + told queries in parallel
+      const npcDetails = await Promise.all(
+        npcs.map(async (n) => {
+          const id = unq(n.C);
+          const [stateRow, toldRows] = await Promise.all([
+            findOne(session, `npc_state('${id}', S)`),
+            findAll(session, `told('${id}', T)`),
+          ]);
+          return { id, name: unq(n.N), disp: unq(n.Disp), stateRow, toldRows };
+        }),
+      );
+      for (const d of npcDetails) {
+        const st = d.stateRow ? unq(d.stateRow.S) : "[]";
+        lines.push(`  - ${d.id} ("${d.name}") disposition=${d.disp} state=${st}`);
+        if (d.toldRows.length) {
+          const topics = d.toldRows.map((t) => unq(t.T)).join(", ");
+          lines.push(`    conversation so far: [${topics}]`);
+        } else {
+          lines.push(`    conversation so far: (never spoken to)`);
+        }
       }
     }
   }
@@ -328,6 +396,11 @@ async function buildPlayContext(
   const inv = await findAll(session, `player_has(I), item_def(I, N, _, _)`);
   if (inv.length) {
     lines.push(`inventory: ${inv.map((i) => `${unq(i.I)} ("${unq(i.N)}")`).join(", ")}`);
+    for (const it of inv) {
+      const iid = unq(it.I);
+      const isRow = await findOne(session, `item_state('${iid}', S)`);
+      if (isRow) lines.push(`  item_state(${iid}): ${unq(isRow.S)}`);
+    }
   } else {
     lines.push("inventory: (empty)");
   }
@@ -491,6 +564,128 @@ async function checkWorldgenInvariants(session: PrologSession): Promise<Invarian
     });
   }
 
+  // Puzzle solvability — only check if basics are solid (scenario exists).
+  if (violations.filter((v) => v.kind.startsWith("no_") || v.kind === "needs_in_fiction_defeat").length === 0) {
+    const puzzleViolations = await checkPuzzleSolvability(session);
+    violations.push(...puzzleViolations);
+  }
+
+  return violations;
+}
+
+// =====================================================================
+// Puzzle solvability — structural checks that the generated scenario is
+// actually playable. Runs after worldgen invariants.
+// =====================================================================
+
+async function checkPuzzleSolvability(session: PrologSession): Promise<InvariantViolation[]> {
+  const violations: InvariantViolation[] = [];
+
+  // --- Map connectivity: all defined locations reachable from start? ---
+  const startRow = await findOne(session, "player_at(L)");
+  if (!startRow) return violations; // handled by other invariants
+  const start = unq(startRow.L);
+
+  const locRows = await findAll(session, "location(L, _, _)");
+  const allLocs = new Set(locRows.map((r) => unq(r.L)));
+
+  // Build adjacency: only include edges where destination is defined
+  const exitRows = await findAll(session, "exit(From, _, To)");
+  const adj = new Map<string, string[]>();
+  for (const ex of exitRows) {
+    const from = unq(ex.From);
+    const to = unq(ex.To);
+    if (!allLocs.has(to)) continue; // frontier exit — play DM fills this in
+    if (!adj.has(from)) adj.set(from, []);
+    adj.get(from)!.push(to);
+  }
+
+  // BFS from start
+  const visited = new Set<string>();
+  const queue = [start];
+  visited.add(start);
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    for (const neighbor of adj.get(current) ?? []) {
+      if (!visited.has(neighbor)) {
+        visited.add(neighbor);
+        queue.push(neighbor);
+      }
+    }
+  }
+
+  for (const loc of allLocs) {
+    if (!visited.has(loc)) {
+      violations.push({
+        kind: "unreachable_location",
+        detail: `location "${loc}" has no path from start "${start}" via defined exits. Add exits to connect it to the map.`,
+      });
+    }
+  }
+
+  // --- Item placement: every item_def is placed somewhere ---
+  const itemRows = await findAll(session, "item_def(I, N, _, _)");
+  const atItems = new Set(
+    (await findAll(session, "at(I, _)")).map((r) => unq(r.I)),
+  );
+  const carriedItems = new Set(
+    (await findAll(session, "player_has(I)")).map((r) => unq(r.I)),
+  );
+  const heldItems = new Set(
+    (await findAll(session, "holds(_, I)")).map((r) => unq(r.I)),
+  );
+
+  for (const it of itemRows) {
+    const id = unq(it.I);
+    if (!atItems.has(id) && !carriedItems.has(id) && !heldItems.has(id)) {
+      violations.push({
+        kind: "unplaced_item",
+        detail: `item "${id}" (${unq(it.N)}) has item_def/4 but is not placed anywhere via at/2, player_has/1, or holds/2. Place it in the world.`,
+      });
+    }
+  }
+
+  // --- Victory rule references: items/locations in body must exist ---
+  const vc = await session.query("clause(victory, Body)");
+  if (vc.status === "success") {
+    for (const ans of vc.answers) {
+      const bodyText = ans.formatted;
+      for (const m of bodyText.matchAll(/player_has\((\w+)\)/g)) {
+        const itemId = m[1];
+        const exists =
+          (await findAll(session, `item_def('${itemId}', _, _, _)`)).length > 0;
+        if (!exists) {
+          violations.push({
+            kind: "victory_refs_missing_item",
+            detail: `victory rule references player_has(${itemId}) but item_def/4 does not exist for "${itemId}". Add the item or fix the rule.`,
+          });
+        }
+      }
+      for (const m of bodyText.matchAll(/player_at\((\w+)\)/g)) {
+        const locId = m[1];
+        const exists =
+          (await findAll(session, `location('${locId}', _, _)`)).length > 0;
+        if (!exists) {
+          violations.push({
+            kind: "victory_refs_missing_location",
+            detail: `victory rule references player_at(${locId}) but location/3 does not exist for "${locId}". Add the location or fix the rule.`,
+          });
+        }
+      }
+    }
+  }
+
+  // --- Turn budget sanity ---
+  const tlRow = await findOne(session, "turn_limit(N)");
+  const turnLimit = tlRow ? parseInt(unq(tlRow.N), 10) : 0;
+  const locCount = allLocs.size;
+  if (turnLimit > 0 && turnLimit < locCount) {
+    violations.push({
+      kind: "turn_budget_tight",
+      detail: `turn_limit(${turnLimit}) is less than the number of defined locations (${locCount}). The player needs at least one turn per room. Increase turn_limit to at least ${locCount * 2}.`,
+    });
+  }
+
   return violations;
 }
 
@@ -516,6 +711,8 @@ interface DriveResult {
   toolCalls: number;
   retries: number;
   violations: InvariantViolation[];
+  /** When true, the LLM threw mid-turn — KB may be partially mutated. */
+  llmError?: string;
 }
 
 async function driveToolLoop(opts: DriveOptions): Promise<DriveResult> {
@@ -529,6 +726,7 @@ async function driveToolLoop(opts: DriveOptions): Promise<DriveResult> {
   let violations: InvariantViolation[] = [];
 
   while (true) {
+    try {
     if (toolCallCount >= opts.maxToolTurns) {
       if (opts.forceWrap !== false) {
         messages.push({
@@ -587,6 +785,16 @@ async function driveToolLoop(opts: DriveOptions): Promise<DriveResult> {
       ];
       messages.push({ role: "user", content: lines.join("\n") });
     }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return {
+        narration: toolCtx.narrations.join("\n\n").trim(),
+        toolCalls: toolCallCount,
+        retries,
+        violations,
+        llmError: msg,
+      };
+    }
   }
 
   return {
@@ -608,6 +816,7 @@ export interface WorldgenResult {
   retries: number;
   ok: boolean;
   violations?: InvariantViolation[];
+  llmError?: string;
 }
 
 export async function runWorldgen(
@@ -641,6 +850,7 @@ export async function runWorldgen(
     retries: r.retries,
     ok: r.violations.length === 0,
     violations: r.violations.length ? r.violations : undefined,
+    llmError: r.llmError,
   };
 }
 
@@ -652,6 +862,8 @@ export interface DMTurnResult {
   violations?: InvariantViolation[];
   /** After end_turn, did victory/defeat fire? */
   endedWith: "won" | { lost: string } | null;
+  /** When set, the LLM threw mid-turn — KB may be partially mutated. */
+  llmError?: string;
 }
 
 /**
@@ -695,15 +907,16 @@ export async function runTurn(
     requireNarration: true,
   });
 
-  const endedWith = r.violations.length === 0 ? await evaluateGameEnd(session) : null;
+  const endedWith = (r.violations.length === 0 && !r.llmError) ? await evaluateGameEnd(session) : null;
 
   return {
     narration: r.narration,
     toolCalls: r.toolCalls,
     retries: r.retries,
-    ok: r.violations.length === 0,
+    ok: r.violations.length === 0 && !r.llmError,
     violations: r.violations.length ? r.violations : undefined,
     endedWith,
+    llmError: r.llmError,
   };
 }
 

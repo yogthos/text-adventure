@@ -86,6 +86,9 @@
 :- dynamic visited/1.        % visited(LocId)
 :- dynamic npc_state/2.      % npc_state(CharId, KeyValueList)
 :- dynamic flag/1.           % flag(Atom)  — boolean world flags
+:- dynamic told/2.           % told(CharId, Topic) — what has been discussed with an NPC
+:- dynamic item_state/2.      % item_state(ItemId, [key=value, ...]) — mutable item properties (lit, open, locked, broken, etc.)
+:- dynamic holds/2.            % holds(ContainerId, ItemId) — items inside containers; retract when removed
 :- dynamic condition/2.      % condition(LocId, DescAtomOrString)
                              %   layered changes since first visit;
                              %   e.g. condition(cottage, burned).

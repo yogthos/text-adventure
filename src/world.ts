@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PrologSession } from "./prolog.js";
+import { unq } from "./prolog.js";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const SCHEMA_PATH = resolve(HERE, "schema.pl");
@@ -44,14 +45,6 @@ export async function consultFile(
   }
 }
 
-/** Strip the surrounding quotes/escapes Prolog applies when rendering an atom or string. */
-function unquote(term: string): string {
-  if (term.startsWith("'") && term.endsWith("'")) {
-    return term.slice(1, -1).replace(/\\'/g, "'").replace(/\\\\/g, "\\");
-  }
-  return term;
-}
-
 /** Run a goal and return one binding per answer, or [] on no solutions / error. */
 async function findAll(
   session: PrologSession,
@@ -79,7 +72,7 @@ async function findOne(
 
 export async function getPlayerLoc(session: PrologSession): Promise<string | null> {
   const row = await findOne(session, "player_at(L)");
-  return row ? unquote(row.L) : null;
+  return row ? unq(row.L) : null;
 }
 
 export async function getInventory(
@@ -90,9 +83,9 @@ export async function getInventory(
     "player_has(I), item_def(I, N, D, T)",
   );
   return rows.map((b) => ({
-    id: unquote(b.I),
-    name: unquote(b.N),
-    desc: unquote(b.D),
+    id: unq(b.I),
+    name: unq(b.N),
+    desc: unq(b.D),
     tags: parseList(b.T),
   }));
 }
@@ -102,7 +95,7 @@ function parseList(term: string): string[] {
   // top-level commas. Tags are bare atoms so we don't need a real parser.
   const inner = term.trim().replace(/^\[/, "").replace(/\]$/, "").trim();
   if (!inner) return [];
-  return inner.split(",").map((s) => unquote(s.trim()));
+  return inner.split(",").map((s) => unq(s.trim()));
 }
 
 /** Pull the full structured view of the player's current location. */
@@ -125,7 +118,7 @@ export async function describeLocation(
   if (!locRow) return null;
 
   const condRows = await findAll(session, `condition('${locId}', C)`);
-  const conditions = condRows.map((b) => unquote(b.C));
+  const conditions = condRows.map((b) => unq(b.C));
 
   const exitRows = await findAll(
     session,
@@ -133,9 +126,9 @@ export async function describeLocation(
   );
   const exits: LocationView["exits"] = [];
   for (const b of exitRows) {
-    const to = unquote(b.To);
+    const to = unq(b.To);
     const known = await succeeds(session, `location('${to}', _, _)`);
-    exits.push({ direction: unquote(b.Dir), to, known });
+    exits.push({ direction: unq(b.Dir), to, known });
   }
 
   const itemRows = await findAll(
@@ -143,9 +136,9 @@ export async function describeLocation(
     `at(I, '${locId}'), item_def(I, N, D, T)`,
   );
   const items = itemRows.map((b) => ({
-    id: unquote(b.I),
-    name: unquote(b.N),
-    desc: unquote(b.D),
+    id: unq(b.I),
+    name: unq(b.N),
+    desc: unq(b.D),
     tags: parseList(b.T),
   }));
 
@@ -154,17 +147,17 @@ export async function describeLocation(
     `at(C, '${locId}'), character_def(C, N, D, _)`,
   );
   const npcs = npcRows.map((b) => ({
-    id: unquote(b.C),
-    name: unquote(b.N),
-    desc: unquote(b.D),
+    id: unq(b.C),
+    name: unq(b.N),
+    desc: unq(b.D),
   }));
 
   const visited = await succeeds(session, `visited('${locId}')`);
 
   return {
     id: locId,
-    shortName: unquote(locRow.N),
-    longDesc: unquote(locRow.D),
+    shortName: unq(locRow.N),
+    longDesc: unq(locRow.D),
     conditions,
     exits,
     items,
@@ -233,7 +226,10 @@ export function formatLocation(v: LocationView): string {
   if (v.npcs.length) {
     parts.push("");
     parts.push(
-      v.npcs.map((n) => `${n.name[0].toUpperCase() + n.name.slice(1)} is here.`).join(" "),
+      v.npcs
+        .filter((n) => n.name.length > 0)
+        .map((n) => `${n.name[0].toUpperCase() + n.name.slice(1)} is here.`)
+        .join(" "),
     );
   }
   if (v.exits.length) {

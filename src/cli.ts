@@ -24,7 +24,7 @@
 import { createInterface } from "node:readline";
 import { stdin, stdout, argv, env } from "node:process";
 import { resolve } from "node:path";
-import { createSession, type PrologSession } from "./prolog.js";
+import { createSession, type PrologSession, unq } from "./prolog.js";
 import { runEpilogue, runTurn, runWorldgen } from "./dm.js";
 import {
   describeCurrent,
@@ -33,6 +33,7 @@ import {
   getPlayerLoc,
 } from "./world.js";
 import { listSlots, loadGame, newGame, saveGame, slotExists } from "./persist.js";
+import { endingBanner, openingBanner, renderMarkdown, style } from "./render.js";
 
 const SEED = resolve("seeds/cottage.pl");
 const DEFAULT_SLOT = "default";
@@ -47,60 +48,55 @@ async function bootstrap(session: PrologSession): Promise<BootResult> {
   const argSlot = argv[2];
 
   if (argSlot === "seed") {
-    console.log(`(loading static cottage seed — no roguelike rules)`);
+    console.log(style.aside(`(loading static cottage seed — no roguelike rules)`));
     await newGame(session, SEED);
     return { slot: DEFAULT_SLOT, rulesLive: false };
   }
 
   if (argSlot === "new") {
-    console.log(`(rolling a fresh scenario...)`);
-    const session2 = await freshSession(session);
-    const wg = await runWorldgenWithRetry(session2);
+    console.log(style.aside(`(rolling a fresh scenario...)`));
+    const wg = await runWorldgenWithRetry(session);
     if (!wg) process.exit(1);
-    printOpening(session, wg.narration, wg.theme);
+    await printOpening(session, wg.narration, wg.theme);
     return { slot: DEFAULT_SLOT, rulesLive: true };
   }
 
   const slot = argSlot ?? DEFAULT_SLOT;
   if (slotExists(slot)) {
-    console.log(`(loaded slot "${slot}")`);
+    console.log(style.aside(`(loaded slot "${slot}")`));
     await loadGame(session, slot);
     const vc = await session.query("clause(victory, _)");
     const live = vc.status === "success" && vc.answers.length > 0;
     if (!live) {
       console.log(
-        "(WARNING: this slot has no victory/0 rules in memory. Save/load currently does not preserve worldgen rules — exploration only.)",
+        style.warn(
+          "(WARNING: this slot has no victory/0 rules in memory. Save/load does not preserve worldgen rules — exploration only.)",
+        ),
       );
     }
     return { slot, rulesLive: live };
   }
 
-  console.log(`(no save in slot "${slot}" — rolling a fresh scenario...)`);
+  console.log(style.aside(`(no save in slot "${slot}" — rolling a fresh scenario...)`));
   const wg = await runWorldgenWithRetry(session);
   if (!wg) process.exit(1);
-  printOpening(session, wg.narration, wg.theme);
+  await printOpening(session, wg.narration, wg.theme);
   return { slot, rulesLive: true };
-}
-
-/**
- * Lightweight wrapper to make TS happy when we want to "reset" a session
- * inside bootstrap. We don't actually swap the session — we just return
- * the same one. (Kept as a hook in case we later want to spin a fresh
- * session for retry on worldgen total failure.)
- */
-async function freshSession(s: PrologSession): Promise<PrologSession> {
-  return s;
 }
 
 async function runWorldgenWithRetry(session: PrologSession) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     const wg = await runWorldgen(session);
     if (wg.ok) return wg;
-    console.log(`(worldgen attempt ${attempt} failed: ${wg.violations?.length ?? 0} unresolved invariant(s))`);
-    for (const v of wg.violations ?? []) console.log(`  - ${v.detail}`);
-    if (attempt < 2) console.log("(retrying)");
+    console.log(
+      style.warn(
+        `(worldgen attempt ${attempt} failed: ${wg.violations?.length ?? 0} unresolved invariant(s))`,
+      ),
+    );
+    for (const v of wg.violations ?? []) console.log(style.warn(`  - ${v.detail}`));
+    if (attempt < 2) console.log(style.aside("(retrying)"));
   }
-  console.error("worldgen failed after 2 attempts. Try again — DeepSeek output is non-deterministic.");
+  console.error(style.error("worldgen failed after 2 attempts. Try again — DeepSeek output is non-deterministic."));
   return null;
 }
 
@@ -112,29 +108,23 @@ async function printOpening(
   const sc = await getScenario(session);
   const tl = await getTurnLimit(session);
   console.log("");
-  console.log("=".repeat(72));
-  console.log(`  THEME: ${theme}`);
-  if (sc) {
-    console.log(`  SETTING: ${sc.setting}`);
-    console.log("");
-    console.log(`  ${sc.premise}`);
-    console.log("");
-    console.log(`  GOAL: ${sc.goal}`);
-  }
-  if (tl !== null) console.log(`  TURN LIMIT: ${tl}`);
-  console.log("=".repeat(72));
+  console.log(
+    openingBanner({
+      theme,
+      setting: sc?.setting,
+      premise: sc?.premise,
+      goal: sc?.goal,
+      turnLimit: tl,
+    }),
+  );
   console.log("");
-  if (openingNarration) console.log(openingNarration);
+  if (openingNarration) console.log(renderMarkdown(openingNarration));
 }
 
 async function getScenario(session: PrologSession): Promise<{ setting: string; premise: string; goal: string } | null> {
   const r = await session.query("scenario(S, P, G)");
   if (r.status !== "success" || r.answers.length === 0) return null;
   const b = r.answers[0].bindings;
-  const unq = (s: string) =>
-    s.startsWith("'") && s.endsWith("'")
-      ? s.slice(1, -1).replace(/\\'/g, "'").replace(/\\\\/g, "\\")
-      : s;
   return { setting: unq(b.S), premise: unq(b.P), goal: unq(b.G) };
 }
 
@@ -155,8 +145,6 @@ async function getTurnCount(session: PrologSession): Promise<number> {
 async function getStats(session: PrologSession): Promise<{ key: string; value: string }[]> {
   const r = await session.query("player_stat(K, V)");
   if (r.status !== "success") return [];
-  const unq = (s: string) =>
-    s.startsWith("'") && s.endsWith("'") ? s.slice(1, -1) : s;
   return r.answers.map((a) => ({ key: unq(a.bindings.K), value: unq(a.bindings.V) }));
 }
 
@@ -186,8 +174,8 @@ async function main(): Promise<void> {
   }
 
   await saveGame(session, slot);
-  console.log(`\n${await statusLine(session)}`);
-  stdout.write("\n> ");
+  console.log(`\n${style.status(await statusLine(session))}`);
+  stdout.write("\n" + style.prompt("> "));
 
   const rl = createInterface({ input: stdin, output: stdout, terminal: false });
   let chain: Promise<void> = Promise.resolve();
@@ -211,7 +199,11 @@ async function main(): Promise<void> {
         } else {
           const result = await runTurn(session, raw);
           if (result.narration) console.log(result.narration);
+          else if (result.llmError) console.log(style.warn(`(dm unavailable: ${result.llmError})`));
           else console.log("(no narration)");
+          if (result.llmError) {
+            console.log(style.warn(`(world state may be inconsistent — dm error mid-turn)`));
+          }
           if (!result.ok) {
             console.log(
               `\n[harness: world state still has ${result.violations?.length ?? 0} unresolved invariant(s) after ${result.retries} retry/retries]`,
@@ -320,7 +312,8 @@ async function handleMeta(
       for (const goal of [
         "scenario(S, P, G)", "game_status(X)", "turn_limit(N)", "turn_count(N)",
         "player_at(L)", "player_has(I)", "at(X, L)", "visited(L)",
-        "condition(L, C)", "flag(F)", "npc_state(C, S)", "player_stat(K, V)",
+        "condition(L, C)", "flag(F)", "npc_state(C, S)", "told(C, T)",
+        "item_state(I, S)", "holds(C, I)", "player_stat(K, V)",
       ]) {
         const r = await session.query(goal);
         if (r.status !== "success") continue;
