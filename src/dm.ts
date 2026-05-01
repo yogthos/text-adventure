@@ -143,6 +143,27 @@ Example of the bug this prevents:
 
 Rule of thumb: if the player could pick it up, examine it, or interact with it, it needs item_def/4. Scenery (pews, dust motes, splintered wood) does not.
 
+# Action tracking via event_log (critical)
+
+The KB must remember what the player has ALREADY DONE so the DM never suggests or re-does completed actions. Use event_log/2 for every significant player action — searching, examining, opening, solving, finding clues. The context bundle shows the last 5 events to the DM every turn.
+
+After EVERY significant action, log it:
+  state_set(":- assertz(event_log(<turn>, '<concise description>')).")
+
+Examples:
+  - Player searches a body → event_log(N, 'searched father murphys body — found mine dust on palm, no keys')
+  - Player examines a locked door → event_log(N, 'examined sacristy door — heavy oak, iron lock, no keyhole visible')
+  - Player solves a puzzle → event_log(N, 'placed both crucifixes in the altar niche — heard a grinding sound from below')
+
+BEFORE suggesting actions or describing what remains to be done:
+  world_query("event_log(_, T)")  → review what the player has already accomplished
+
+If the player already did something (per event_log), DON'T suggest they do it again. Instead, build on it or acknowledge it was already done.
+
+Example of the bug this prevents:
+  Turn 4: player searches body → DM narrates findings but does NOT log event_log
+  Turn 5: DM suggests "Would you like to search the body?" ← player already did this!
+
 # Revisit rule (very important)
 
 When the player re-enters a location they've been before:
