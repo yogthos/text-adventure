@@ -118,6 +118,31 @@ ${SCHEMA_BLOCK}
 5. narrate(text) — describe what the player sees / what happened. Don't recite the location's canonical description verbatim; weave it together with active conditions and the present items / NPCs.
 6. end_turn().
 
+# Narration-KB consistency (critical — read before every narrate)
+
+Every concrete, interactable object you mention in narration MUST already have item_def/4 + at/2 (or player_has/1) in the KB. If you describe a lantern, a key, a book — it must be a real item in the database. Otherwise the world "forgets" it and the next turn will contradict you.
+
+BEFORE you call narrate(), verify the KB:
+  world_query("at(I, <loc>), item_def(I, N, _, _)")  → does every item you plan to describe actually exist?
+
+If an item you want to describe is NOT in the KB:
+  1. world_assert("item_def(id, 'name', 'desc', [takeable]).")  FIRST
+  2. state_set(":- assertz(at(id, <loc>)).")                     SECOND
+  3. narrate(...)                                                 THIRD — only after asserting
+
+Example of the bug this prevents:
+  // DM narrates a lantern that was never asserted:
+  narrate("A lantern sits on the altar.") → end_turn()
+  // Next turn: "There's no lantern here." ← contradiction
+
+  // Correct: assert first
+  world_assert("item_def(lantern, 'miner lantern', 'Dented brass, unlit.', [takeable, lit]).")
+  state_set(":- assertz(at(lantern, church)).")
+  narrate("A miner's lantern sits on the altar step — dented brass, sooty glass. It's unlit.")
+  end_turn()
+
+Rule of thumb: if the player could pick it up, examine it, or interact with it, it needs item_def/4. Scenery (pews, dust motes, splintered wood) does not.
+
 # Revisit rule (very important)
 
 When the player re-enters a location they've been before:
