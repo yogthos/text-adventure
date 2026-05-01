@@ -198,9 +198,9 @@ async function main(): Promise<void> {
           console.log("(this run has ended — start a new one with: npm run play -- new)");
         } else {
           const result = await runTurn(session, raw);
-          if (result.narration) console.log(result.narration);
+          if (result.narration) console.log(renderMarkdown(result.narration));
           else if (result.llmError) console.log(style.warn(`(dm unavailable: ${result.llmError})`));
-          else console.log("(no narration)");
+          else console.log(style.aside("(no narration)"));
           if (result.llmError) {
             console.log(style.warn(`(world state may be inconsistent — dm error mid-turn)`));
           }
@@ -215,7 +215,7 @@ async function main(): Promise<void> {
             );
           }
           await saveGame(session, slot);
-          console.log(`\n${await statusLine(session)}`);
+          console.log(`\n${style.status(await statusLine(session))}`);
 
           if (result.endedWith !== null) {
             await runEnding(session, result.endedWith);
@@ -226,9 +226,9 @@ async function main(): Promise<void> {
           }
         }
       } catch (e) {
-        console.error(`error: ${e instanceof Error ? e.message : String(e)}`);
+        console.error(style.error(`error: ${e instanceof Error ? e.message : String(e)}`));
       }
-      if (!done) stdout.write("\n> ");
+      if (!done) stdout.write("\n" + style.prompt("> "));
     });
   });
 
@@ -239,14 +239,12 @@ async function main(): Promise<void> {
 
 async function runEnding(session: PrologSession, outcome: "won" | { lost: string }): Promise<void> {
   console.log("");
-  console.log("=".repeat(72));
-  console.log(outcome === "won" ? "  YOU WIN" : `  YOU LOSE — ${outcome.lost}`);
-  console.log("=".repeat(72));
+  console.log(endingBanner(outcome));
   console.log("");
   const ep = await runEpilogue(session, outcome);
-  if (ep.narration) console.log(ep.narration);
+  if (ep.narration) console.log(renderMarkdown(ep.narration));
   console.log("");
-  console.log(`(final turn: ${await getTurnCount(session)})`);
+  console.log(style.aside(`(final turn: ${await getTurnCount(session)})`));
 }
 
 async function handleMeta(
