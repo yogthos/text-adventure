@@ -1,0 +1,23 @@
+{
+  "name": "text-adventure",
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Zork-style adventure where an LLM DM builds the world on the fly, grounded in a SWI-Prolog knowledge base.",
+  "scripts": {
+    "play": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "prolog-wasm-full": "^0.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.0.17"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
